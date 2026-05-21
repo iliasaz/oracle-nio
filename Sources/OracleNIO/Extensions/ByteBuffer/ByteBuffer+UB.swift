@@ -25,7 +25,7 @@ extension ByteBuffer {
     }
 
     mutating func throwingSkipUB2(file: String = #fileID, line: Int = #line) throws {
-        try throwingSkipUB(4, file: file, line: line)
+        try throwingSkipUB(2, file: file, line: line)
     }
 
     @inlinable

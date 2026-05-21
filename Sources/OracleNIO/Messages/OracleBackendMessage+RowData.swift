@@ -206,8 +206,8 @@ extension OracleBackendMessage {
             case .vector:
                 let length = try buffer.throwingReadUB4()
                 if length > 0 {
-                    buffer.skipUB8()  // size (unused)
-                    buffer.skipUB4()  // chunk size (unused)
+                    try buffer.throwingSkipUB8()  // size (unused)
+                    try buffer.throwingSkipUB4()  // chunk size (unused)
                     switch buffer.readOracleSlice() {
                     case .some(let slice):
                         columnValue = slice
@@ -237,9 +237,9 @@ extension OracleBackendMessage {
                         throw MissingDataDecodingError.Trigger()
                     }
                 }
-                buffer.skipUB2()  // version
+                try buffer.throwingSkipUB2()  // version
                 let dataLength = try buffer.throwingReadUB4()
-                buffer.skipUB2()  // flags
+                try buffer.throwingSkipUB2()  // flags
                 if dataLength > 0 {
                     if !buffer.skipRawBytesChunked() {  // data
                         throw MissingDataDecodingError.Trigger()

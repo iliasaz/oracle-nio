@@ -97,6 +97,68 @@ private typealias RowData = OracleBackendMessage.RowData
             })
     }
 
+    /// Regression test: an object (SDO_GEOMETRY etc.) whose serialized form is
+    /// split across a TNS packet boundary *inside* one of the fixed-width
+    /// `version`/`flags` fields must request more data, not crash.
+    ///
+    /// The pre-existing `processObjectColumnDataRequestsMissingData` test only
+    /// truncates at the chunked oid/data boundaries (which already throw
+    /// `Trigger`); it always encodes the fixed fields as a single zero-length
+    /// byte, so the buggy non-throwing `skipUB2()` was never exercised with a
+    /// short buffer.
+    @Test func processObjectColumnTruncatedInFixedFieldRequestsMissingData() {
+        let type = OracleDataType.object
+
+        // type oid / oid / snapshot all empty, then a `version` field whose
+        // length byte announces 1 value byte that is missing.
+        var buffer = ByteBuffer(bytes: [
+            0,  // type oid (empty)
+            0,  // oid (empty)
+            0,  // snapshot (empty)
+            1,  // version: length byte = 1 (value byte missing)
+        ])
+        #expect(performing: {
+            try RowData.decode(from: &buffer, context: .init(columns: type))
+        }, throws: { error in
+            error is MissingDataDecodingError.Trigger
+                || (error as? OraclePartialDecodingError)?.category == .expectedAtLeastNRemainingBytes
+        })
+
+        // Reaches the `flags` field, which is truncated. This is the exact
+        // path from the reported crash (RowData.swift `buffer.skipUB2() // flags`).
+        buffer = ByteBuffer(bytes: [
+            0,  // type oid (empty)
+            0,  // oid (empty)
+            0,  // snapshot (empty)
+            0,  // version (empty)
+            1, 5,  // data length = 5
+            1,  // flags: length byte = 1 (value byte missing)
+        ])
+        #expect(performing: {
+            try RowData.decode(from: &buffer, context: .init(columns: type))
+        }, throws: { error in
+            error is MissingDataDecodingError.Trigger
+                || (error as? OraclePartialDecodingError)?.category == .expectedAtLeastNRemainingBytes
+        })
+    }
+
+    /// Regression test: a vector column truncated inside the fixed-width
+    /// `size`/`chunk size` fields must request more data, not crash.
+    @Test func processVectorColumnTruncatedInFixedFieldRequestsMissingData() {
+        let type = OracleDataType.vector
+
+        var buffer = ByteBuffer(bytes: [
+            1, 1,  // length = 1 (> 0, so size/chunk are read)
+            1,  // size: length byte = 1 (value byte missing)
+        ])
+        #expect(performing: {
+            try RowData.decode(from: &buffer, context: .init(columns: type))
+        }, throws: { error in
+            error is MissingDataDecodingError.Trigger
+                || (error as? OraclePartialDecodingError)?.category == .expectedAtLeastNRemainingBytes
+        })
+    }
+
     @Test func processLOBColumnDataRequestsMissingData() throws {
         let type = OracleDataType.blob
 

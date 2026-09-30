@@ -140,4 +140,41 @@ import Testing
         OracleNumeric.encodeNumeric(5e-9, into: &rhsBuffer)
         #expect(lhsBuffer != rhsBuffer)
     }
+
+    // Bytes that are not a `NUMBER` (the debug rendering of a failed statement's
+    // binds can pair NUMBER metadata with text bytes) must throw, never trap.
+    @Test(arguments: [
+        // one byte, sign bit clear: the -1e126 special value, outside every
+        // fixed-width integer (used to trap in `T.init(_: Double)`)
+        [UInt8(ascii: "x")],
+        [UInt8(0x3E)],
+        // negative header, then a mantissa byte above 101 (used to underflow
+        // `101 - byte`): the text "hello world"
+        Array("hello world".utf8),
+        [UInt8(0x3E), 0xFF],
+        // positive header, then a zero mantissa byte (used to underflow `byte - 1`)
+        [UInt8(0xC1), 0x00],
+    ])
+    func malformedIntegerBytesThrow(bytes: [UInt8]) {
+        #expect(throws: (any Error).self) {
+            var buffer = ByteBuffer(bytes: bytes)
+            let _: Int64 = try OracleNumeric.parseInteger(from: &buffer)
+        }
+        #expect(throws: (any Error).self) {
+            var buffer = ByteBuffer(bytes: bytes)
+            let _: Int8 = try OracleNumeric.parseInteger(from: &buffer)
+        }
+    }
+
+    @Test(arguments: [
+        Array("hello world".utf8),
+        [UInt8(0x3E), 0xFF],
+        [UInt8(0xC1), 0x00],
+    ])
+    func malformedFloatBytesThrow(bytes: [UInt8]) {
+        #expect(throws: (any Error).self) {
+            var buffer = ByteBuffer(bytes: bytes)
+            let _: Double = try OracleNumeric.parseFloat(from: &buffer)
+        }
+    }
 }

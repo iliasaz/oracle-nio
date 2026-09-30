@@ -174,11 +174,42 @@ import Testing
 
     @Test func encodeFractionAt2026IsNanosecondsNotMilliseconds() throws {
         // 2026-09-30T12:34:56.001234Z. Foundation reads this Date's fraction
-        // as 1_234_054 ns, so compare to within one microsecond of 1_234_000
-        // (0x0012D450). The pre-fix encoder wrote the millisecond count, 1.
+        // as 1_234_054 ns; the encoder rounds to the microsecond, so the wire
+        // carries exactly 1_234_000 (0x0012D450). The pre-fix encoder wrote
+        // the millisecond count, 1.
         let (bytes, fraction) = try self.encodeFraction(self.september30(nanosecond: 1_234_000))
         #expect(bytes.count == 13)
-        #expect(abs(Int(fraction) - 1_234_000) < 1_000, "fraction \(fraction)")
+        #expect(Array(bytes[7..<11]) == [0x00, 0x12, 0xD4, 0x50])
+        #expect(fraction == 1_234_000)
+    }
+
+    @Test(arguments: [1, 999, 1_234, 123_456, 500_000, 999_999])
+    func encodeAt2026CarriesNoSubMicrosecondNoise(microseconds: Int) throws {
+        // Foundation reads 1 us at a 2026 instant as 953 ns and .999999 as
+        // 999_999_046 ns. Rounding to the microsecond sends what python-oracledb
+        // sends (microsecond * 1000), so a TIMESTAMP(9) column stores no noise.
+        let (_, fraction) = try self.encodeFraction(
+            self.september30(nanosecond: microseconds * 1_000))
+        #expect(fraction == UInt32(microseconds * 1_000))
+    }
+
+    @Test func encodeRoundsSubMicrosecondToNearest() throws {
+        // Inside the reference second Foundation holds these exactly.
+        let down = self.utcDate(
+            year: 2001, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 1_234_400)
+        let up = self.utcDate(
+            year: 2001, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 1_234_600)
+        #expect(try self.encodeFraction(down).fraction == 1_234_000)
+        #expect(try self.encodeFraction(up).fraction == 1_235_000)
+    }
+
+    @Test func encodeFractionRoundingUpCarriesIntoTheNextSecond() throws {
+        // 12:34:56.9999998 rounds to 12:34:57.000000, never to a fraction of
+        // 1_000_000_000 (out of range) or back to 12:34:56.000000.
+        let (bytes, fraction) = try self.encodeFraction(
+            self.september30(nanosecond: 999_999_800))
+        #expect(Array(bytes[0..<7]) == [120, 126, 9, 30, 13, 35, 58])  // second 57 + 1
+        #expect(fraction == 0)
     }
 
     @Test func encodeHalfSecondIs500MillionNanoseconds() throws {
@@ -258,6 +289,9 @@ import Testing
         let date = self.september30(nanosecond: microseconds * 1_000)
         var buffer = ByteBuffer()
         date.encode(into: &buffer, context: .default)
+        #expect(
+            buffer.getInteger(at: 7, endianness: .big, as: UInt32.self)
+                == UInt32(microseconds * 1_000))
         let decoded = try Date(from: &buffer, type: .timestampTZ, context: .default)
         #expect(self.microseconds(of: decoded) == microseconds)
         #expect(abs(decoded.timeIntervalSince(date)) < 0.000_001)

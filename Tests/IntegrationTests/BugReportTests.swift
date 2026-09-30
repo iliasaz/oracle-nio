@@ -233,8 +233,9 @@ private struct Timestamp: Sendable, OracleCodable {
         buffer.writeInteger(UInt8(components.minute! + 1))
         buffer.writeInteger(UInt8(components.second! + 1))
         if length > 7 {
-            let fractionalSeconds =
-                UInt32(components.nanosecond! / 1_000_000)
+            // The fractional field is a count of nanoseconds, as in the library's
+            // Date codec (python-oracledb writes microsecond * 1000).
+            let fractionalSeconds = UInt32(components.nanosecond!)
             if fractionalSeconds == 0 && length <= 11 {
                 length = 7
             } else {
@@ -284,8 +285,8 @@ private struct Timestamp: Sendable, OracleCodable {
                     endianness: .big, as: UInt32.self
                 )
             {
-                let fsecond = Double(value) / pow(10, Double(String(value).count))
-                components.nanosecond = Int(fsecond * 1_000_000_000)
+                // A count of nanoseconds (0...999_999_999), not a decimal fraction.
+                components.nanosecond = Int(value)
             }
 
             guard let value = calendar.date(from: components) else {

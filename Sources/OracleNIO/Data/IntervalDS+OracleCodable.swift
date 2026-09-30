@@ -14,6 +14,11 @@
 
 public import NIOCore
 
+/// An Oracle `INTERVAL DAY TO SECOND` value.
+///
+/// `fractionalSeconds` is a count of **nanoseconds** (`0..<1_000_000_000`), the unit the
+/// wire format carries in bytes 7 to 10. `IntervalDS(fractionalSeconds: 500)` is therefore
+/// 500 ns, not 500 ms; half a second is `fractionalSeconds: 500_000_000`.
 public struct IntervalDS: Sendable, Equatable, Hashable {
     public var days: Int
     public var hours: Int
@@ -34,7 +39,16 @@ public struct IntervalDS: Sendable, Equatable, Hashable {
 extension IntervalDS: ExpressibleByFloatLiteral {
     @inlinable
     public init(floatLiteral value: Double) {
-        var remaining = value
+        // Split off the fraction first and round it to the nearest nanosecond, so a
+        // literal such as 3.001234 (stored as 3.00123399999...) keeps its last digit.
+        // Rounding up to a whole second carries into the integral part.
+        var whole = value.rounded(.down)
+        var fractionalSeconds = ((value - whole) * 1_000_000_000).rounded()
+        if fractionalSeconds >= 1_000_000_000 {
+            whole += 1
+            fractionalSeconds -= 1_000_000_000
+        }
+        var remaining = whole
         let days = (remaining / (24 * 60 * 60)).rounded(.down)
         remaining -= Double(days) * 24 * 60 * 60
         let hours = (remaining / (60 * 60)).rounded(.down)
@@ -42,7 +56,6 @@ extension IntervalDS: ExpressibleByFloatLiteral {
         let minutes = (remaining / 60).rounded(.down)
         remaining -= Double(minutes) * 60
         let seconds = remaining.rounded(.down)
-        let fractionalSeconds = ((remaining - seconds) * 1000).rounded(.down)
         self = .init(
             days: Int(days),
             hours: Int(hours),
@@ -55,7 +68,7 @@ extension IntervalDS: ExpressibleByFloatLiteral {
     @inlinable
     public var double: Double {
         return (Double(days) * 24 * 60 * 60) + (Double(hours) * 60 * 60) + (Double(minutes) * 60)
-            + Double(seconds) + (Double(fractionalSeconds) / 1000)
+            + Double(seconds) + (Double(fractionalSeconds) / 1_000_000_000)
     }
 }
 

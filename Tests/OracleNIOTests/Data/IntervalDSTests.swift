@@ -104,6 +104,39 @@ import Testing
         #expect(decoded == interval)
     }
 
+    @Test func decodeNegativeIntervalDoesNotTrap() throws {
+        // -(1 day 2 h 3 min 4.5 s): every component sits below its midpoint.
+        // Pre-fix, the UInt32/UInt8 subtraction trapped on the first field.
+        var buffer = ByteBuffer()
+        buffer.writeInteger(Constants.TNS_DURATION_MID - 1, endianness: .big)
+        buffer.writeInteger(Constants.TNS_DURATION_OFFSET - 2)
+        buffer.writeInteger(Constants.TNS_DURATION_OFFSET - 3)
+        buffer.writeInteger(Constants.TNS_DURATION_OFFSET - 4)
+        buffer.writeInteger(Constants.TNS_DURATION_MID - 500_000_000, endianness: .big)
+        let interval = try IntervalDS(from: &buffer, type: .intervalDS, context: .default)
+        #expect(
+            interval
+                == IntervalDS(
+                    days: -1, hours: -2, minutes: -3, seconds: -4, fractionalSeconds: -500_000_000))
+        #expect(interval.double == -(86_400 + 7_200 + 180 + 4.5))
+    }
+
+    @Test func negativeLiteralEncodesAndRoundTrips() throws {
+        // A negative literal splits python-oracledb style (floor on days, the
+        // rest non-negative): -1.5 s is -1 day + 23:59:58.5.
+        let interval = IntervalDS(floatLiteral: -1.5)
+        #expect(
+            interval
+                == IntervalDS(
+                    days: -1, hours: 23, minutes: 59, seconds: 58, fractionalSeconds: 500_000_000))
+        var buffer = ByteBuffer()
+        interval.encode(into: &buffer, context: .default)
+        #expect(buffer.getInteger(at: 0, endianness: .big, as: UInt32.self) == 0x7FFF_FFFF)
+        let decoded = try IntervalDS(from: &buffer, type: .intervalDS, context: .default)
+        #expect(decoded == interval)
+        #expect(decoded.double == -1.5)
+    }
+
     @Test func jsonRoundTripKeepsNanoseconds() throws {
         var buffer = ByteBuffer()
         var writer = OracleJSONWriter()

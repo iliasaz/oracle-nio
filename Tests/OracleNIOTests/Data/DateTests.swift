@@ -142,9 +142,11 @@ import Testing
     }
 
     /// Microseconds of the fractional second, rounded to the nearest microsecond.
+    /// Deliberately not reduced modulo 1_000_000: a fraction that rounds up to a
+    /// whole second reads as 1_000_000, so it cannot pass for a zero fraction.
     private func microseconds(of date: Date) -> Int {
         let nanosecond = self.utcCalendar.dateComponents([.nanosecond], from: date).nanosecond!
-        return (nanosecond + 500) / 1_000 % 1_000_000
+        return (nanosecond + 500) / 1_000
     }
 
     /// The encoded bytes of `date` and the fractional field read from bytes 7...10.
@@ -196,7 +198,10 @@ import Testing
         #expect(fraction == 0)
     }
 
-    private func makeTimestampBuffer(fraction: UInt32) -> ByteBuffer {
+    /// A TIMESTAMP value with fractional field `fraction`: the 11-byte form a
+    /// TIMESTAMP / TIMESTAMP WITH LOCAL TIME ZONE column arrives in, or with
+    /// `withTimeZone` the 13-byte TIMESTAMP WITH TIME ZONE form (UTC offset).
+    private func makeTimestampBuffer(fraction: UInt32, withTimeZone: Bool) -> ByteBuffer {
         var buffer = ByteBuffer()
         buffer.writeInteger(UInt8(120))  // year hi: 100 + 2025/100
         buffer.writeInteger(UInt8(125))  // year lo: 100 + 2025%100
@@ -206,13 +211,18 @@ import Testing
         buffer.writeInteger(UInt8(1))  // minute + 1 (0)
         buffer.writeInteger(UInt8(1))  // second + 1 (0)
         buffer.writeInteger(fraction, endianness: .big, as: UInt32.self)  // fractional ns
-        buffer.writeInteger(UInt8(Constants.TZ_HOUR_OFFSET))  // +00
-        buffer.writeInteger(UInt8(Constants.TZ_MINUTE_OFFSET))  // :00
+        if withTimeZone {
+            buffer.writeInteger(UInt8(Constants.TZ_HOUR_OFFSET))  // +00
+            buffer.writeInteger(UInt8(Constants.TZ_MINUTE_OFFSET))  // :00
+        }
         return buffer
     }
 
     @Test(arguments: [
         // (fraction in ns on the wire, expected microseconds)
+        // Only the first two fail on the pre-fix decoder, which divided by
+        // 10^(decimal digits): right for 9-digit fractions and for zero, wrong
+        // for any fraction with a leading zero. The other four are boundaries.
         (UInt32(1_234_000), 1_234),  // .001234 — pre-fix decode read .1234
         (UInt32(1_000), 1),  // .000001 — pre-fix decode read .1
         (UInt32(500_000_000), 500_000),  // .5
@@ -221,16 +231,25 @@ import Testing
         (UInt32(999_999_000), 999_999),  // .999999
     ])
     func decodeFractionIsANanosecondCount(fraction: UInt32, expectedMicroseconds: Int) throws {
-        for type in [OracleDataType.timestamp, .timestampLTZ, .timestampTZ] {
-            var buffer = self.makeTimestampBuffer(fraction: fraction)
+        let forms: [(OracleDataType, withTimeZone: Bool)] = [
+            (.timestamp, false),  // 11 bytes, the TIMESTAMP / TIMESTAMP(6) column shape
+            (.timestampLTZ, false),  // 11 bytes
+            (.timestamp, true),  // 13 bytes
+            (.timestampLTZ, true),
+            (.timestampTZ, true),
+        ]
+        for (type, withTimeZone) in forms {
+            var buffer = self.makeTimestampBuffer(fraction: fraction, withTimeZone: withTimeZone)
+            let label = "fraction \(fraction) as \(type), \(withTimeZone ? 13 : 11) bytes"
             let decoded = try Date(from: &buffer, type: type, context: .default)
+            #expect(self.microseconds(of: decoded) == expectedMicroseconds, "\(label)")
+            // The whole second is untouched by the fraction: the decoded instant
+            // lies in [noon, noon + 1 s) and exactly the fraction past noon.
+            let delta = decoded.timeIntervalSince(self.expectedApril26Noon2025UTC)
+            #expect(delta >= 0 && delta < 1, "\(label): delta \(delta)")
             #expect(
-                self.microseconds(of: decoded) == expectedMicroseconds,
-                "fraction \(fraction) as \(type)")
-            // The whole-second part is untouched by the fraction.
-            #expect(
-                abs(decoded.timeIntervalSince(expectedApril26Noon2025UTC))
-                    < 1, "fraction \(fraction) as \(type)")
+                abs(delta - Double(expectedMicroseconds) / 1_000_000) < 0.000_001,
+                "\(label): delta \(delta)")
         }
     }
 

@@ -46,7 +46,7 @@ import Testing
     /// used to underflow `101 - byte` in the NUMBER digit loop, and a one-byte
     /// text read as the -1e126 NUMBER and trapped converting it to `Int64`.
     @Test(arguments: ["hello world", "x"])
-    func debugDescriptionWithReturnBindBeforeTextBindsDoesNotTrap(text: String) {
+    func debugDescriptionWithReturnBindBeforeTextBindsDoesNotTrap(text: String) throws {
         var binds = OracleBindings()
         binds.append(OracleRef(dataType: .number), bindName: "id", isReturning: true)
         binds.append(text, context: .default, bindName: "name")
@@ -60,6 +60,17 @@ import Testing
         let debug = String(reflecting: error)
         #expect(debug.contains("OracleStatement(sql: "))
         #expect(debug.contains("DB_TYPE_NUMBER"))
+        // The misaligned NUMBER bind (the first one printed) renders as the
+        // byte-count fallback: the text bytes must be refused as a NUMBER, not
+        // decoded into a plausible integer or shown as a bogus value.
+        let bindsStart = try #require(debug.range(of: "binds: ["), "\(debug)")
+        let rendered = try #require(
+            debug[bindsStart.upperBound...]
+                .drop(while: { $0.isWhitespace || $0 == "(" })
+                .components(separatedBy: "), (").first,
+            "\(debug)")
+        #expect(rendered.hasPrefix("\(text.utf8.count) bytes; "), "\(rendered)")
+        #expect(rendered.contains("name: \"DB_TYPE_NUMBER\""), "\(rendered)")
         #expect(!String(describing: error).isEmpty)
     }
 }

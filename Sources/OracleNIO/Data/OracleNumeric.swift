@@ -300,7 +300,12 @@ internal enum OracleNumeric {
             return 0
 
         case .returnMagic:
-            return .init(pow(Double(-10), 126))
+            // -1e126 is outside the range of every fixed-width integer; converting
+            // it with `T.init(_:)` traps, so report it as a decoding failure.
+            guard let value = T(exactly: pow(Double(-10), 126)) else {
+                throw OracleDecodingError.Code.failure
+            }
+            return value
 
         case .header(let header):
             return try withUnsafeTemporaryAllocation(
@@ -587,9 +592,13 @@ internal enum OracleNumeric {
             guard var byte = buffer.getInteger(at: i, as: UInt8.self) else {
                 throw OracleDecodingError.Code.missingData
             }
+            // a positive mantissa byte is at least 1 and a negative one at most 101;
+            // anything else is not a `NUMBER` (e.g. text bytes) and would underflow
             if isPositive {
+                guard byte >= 1 else { throw OracleDecodingError.Code.failure }
                 byte -= 1
             } else {
+                guard byte <= 101 else { throw OracleDecodingError.Code.failure }
                 byte = 101 - byte
             }
 

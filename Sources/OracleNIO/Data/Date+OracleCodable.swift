@@ -42,9 +42,15 @@ extension Date: OracleEncodable {
             .dateComponents([.timeZone], from: self).timeZone!
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        // Round to the nearest microsecond, as python-oracledb does
+        // (microsecond * 1000). A Date is a Double of seconds since 2001, so at
+        // present-day instants it resolves only about 119 ns and Foundation reads
+        // .001234 back as 1_234_054 ns; sending that raw would store the noise in a
+        // TIMESTAMP(9) column. Adding half a microsecond and truncating below lets
+        // the calendar carry a fraction that rounds up into the next second.
         let components = calendar.dateComponents(
             [.year, .month, .day, .hour, .minute, .second, .nanosecond],
-            from: self
+            from: self.addingTimeInterval(0.000_000_5)
         )
         let year = components.year!
         buffer.writeInteger(UInt8(year / 100 + 100))
@@ -55,8 +61,9 @@ extension Date: OracleEncodable {
         buffer.writeInteger(UInt8(components.minute! + 1))
         buffer.writeInteger(UInt8(components.second! + 1))
         if length > 7 {
-            let fractionalSeconds =
-                UInt32(components.nanosecond! / 1_000_000)
+            // The fractional field is a count of nanoseconds (0...999_999_999),
+            // here a whole number of microseconds.
+            let fractionalSeconds = UInt32(components.nanosecond! / 1_000 * 1_000)
             if fractionalSeconds == 0 && length <= 11 {
                 length = 7
             } else {
@@ -109,8 +116,8 @@ extension Date: OracleDecodable {
                     endianness: .big, as: UInt32.self
                 )
             {
-                let fsecond = Double(value) / pow(10, Double(String(value).count))
-                nanosecond = Int(fsecond * 1_000_000_000)
+                // The fractional field is a count of nanoseconds (0...999_999_999).
+                nanosecond = Int(value)
             }
 
             let (byte11, byte12) =

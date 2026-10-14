@@ -199,9 +199,30 @@ public final class OracleConnection: Sendable {
             return channel.eventLoop.makeFailedFuture(error)
         }
 
-        // 3. wait for startup future to succeed.
+        // 3. bound the handshake
 
-        return eventHandler.startupDoneFuture
+        let startupDone: EventLoopFuture<OracleSQLEvent.StartupContext>
+        if let timeout = configuration.options.handshakeTimeout {
+            do {
+                startupDone = try Self.withHandshakeDeadline(
+                    timeout,
+                    startup: eventHandler.startupDoneFuture,
+                    channel: channel,
+                    // Close below OracleChannelHandler: its own close() would
+                    // send a Logoff and wait for an answer that never comes.
+                    closingFrom: sslHandler.map { $0 as ChannelHandler } ?? channelHandler
+                )
+            } catch {
+                return channel.eventLoop.makeFailedFuture(error)
+            }
+        } else {
+            startupDone = eventHandler.startupDoneFuture
+        }
+
+        // 4. wait for startup future to succeed.
+
+        return
+            startupDone
             .flatMapError { error in
                 // in case of a startup error, the connection must be closed and
                 // after that the originating error should be surfaced
@@ -218,6 +239,35 @@ public final class OracleConnection: Sendable {
                     context: context
                 )
             }
+    }
+
+    /// Fails `startup` with ``OracleSQLError/Code/handshakeTimeout`` and closes the
+    /// channel when neither a successful startup nor a channel close happened
+    /// within `timeout`.
+    ///
+    /// A startup that already failed keeps the deadline armed until the channel
+    /// closes, because the caller waits for that close before it rethrows.
+    private static func withHandshakeDeadline(
+        _ timeout: TimeAmount,
+        startup: EventLoopFuture<OracleSQLEvent.StartupContext>,
+        channel: Channel,
+        closingFrom handler: ChannelHandler
+    ) throws -> EventLoopFuture<OracleSQLEvent.StartupContext> {
+        let eventLoop = channel.eventLoop
+        let closer = NIOLoopBound(
+            try channel.pipeline.syncOperations.context(handler: handler),
+            eventLoop: eventLoop
+        )
+        let promise = eventLoop.makePromise(of: OracleSQLEvent.StartupContext.self)
+        let deadline = eventLoop.scheduleTask(in: timeout) {
+            // no-op if startup already failed with its own error
+            promise.fail(OracleSQLError.handshakeTimeout(after: timeout))
+            closer.value.close(mode: .all, promise: nil)
+        }
+        startup.whenSuccess { _ in deadline.cancel() }
+        channel.closeFuture.whenComplete { _ in deadline.cancel() }
+        promise.completeWith(startup)
+        return promise.futureResult
     }
 
     /// Create a new connection to an Oracle server.

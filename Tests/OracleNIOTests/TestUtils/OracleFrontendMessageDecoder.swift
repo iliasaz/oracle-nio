@@ -89,6 +89,9 @@ struct OracleFrontendMessageDecoder: NIOSingleStepByteToMessageDecoder {
                 case .logoff:
                     buffer.moveReaderIndex(forwardBy: buffer.readableBytes)
                     return .logoff
+                case .execute, .reexecute, .reexecuteAndFetch, .fetch:
+                    buffer.moveReaderIndex(forwardBy: buffer.readableBytes)
+                    return .execute
                 default:
                     preconditionFailure("TODO: Unimplemented")
                 }

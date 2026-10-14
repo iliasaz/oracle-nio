@@ -137,11 +137,13 @@ extension ConnectionStateMachine.ConnectionAction: Equatable {
             return lhsRows == rhsRows && lhsCursorID == rhsCursorID && lhsAffectedRows == rhsAffectedRows
                 && lhsLastRowID == rhsLastRowID
         case (
-            .forwardStreamError(let lhsError, let lhsRead, let lhsCursorID, let lhsClientCancelled),
-            .forwardStreamError(let rhsError, let rhsRead, let rhsCursorID, let rhsClientCancelled)
+            .forwardStreamError(
+                let lhsError, let lhsRead, let lhsCursorID, let lhsClientCancelled, let lhsCleanup),
+            .forwardStreamError(
+                let rhsError, let rhsRead, let rhsCursorID, let rhsClientCancelled, let rhsCleanup)
         ):
             return lhsError == rhsError && lhsRead == rhsRead && lhsCursorID == rhsCursorID
-                && lhsClientCancelled == rhsClientCancelled
+                && lhsClientCancelled == rhsClientCancelled && lhsCleanup == rhsCleanup
 
         case (.sendMarker, .sendMarker):
             return true

@@ -145,6 +145,12 @@ final class OracleChannelHandler: ChannelDuplexHandler {
         let containers = self.unwrapInboundIn(data)
         for container in containers {
             for message in container.messages {
+                if self.state.isDiscardingInbound {
+                    self.logger.trace(
+                        "Discarding backend message on a closing connection",
+                        metadata: [.message: "\(message)"])
+                    continue
+                }
                 self.handleMessage(
                     message, flags: container.flags, context: context
                 )
@@ -410,10 +416,12 @@ final class OracleChannelHandler: ChannelDuplexHandler {
         case .succeedStatement(let promise, let result):
             self.succeedStatement(promise, result: result, context: context)
         case .failStatement(let promise, let error, let cleanupContext):
-            promise.fail(error)
+            // Start closing before the caller learns about the error, so a
+            // pool that gets the connection back already sees it closing.
             if let cleanupContext {
                 self.closeConnectionAndCleanup(cleanupContext, context: context)
             }
+            promise.fail(error)
             self.run(self.state.readyForStatementReceived(), with: context)
 
         case .forwardRows(let rows):
@@ -436,8 +444,11 @@ final class OracleChannelHandler: ChannelDuplexHandler {
             self.run(self.state.readyForStatementReceived(), with: context)
 
         case .forwardStreamError(
-            let error, let read, let cursorID, let clientCancelled
+            let error, let read, let cursorID, let clientCancelled, let connectionCleanup
         ):
+            if let connectionCleanup {
+                self.closeConnectionAndCleanup(connectionCleanup, context: context)
+            }
             self.rowStream!.receive(completion: .failure(error))
             self.rowStream = nil
             if let cursorID {
@@ -813,6 +824,8 @@ final class OracleChannelHandler: ChannelDuplexHandler {
         case .close:
             let action = self.state.close(cleanup.closePromise)
             self.run(action, with: context)
+        case .closeWithoutLogoff:
+            context.close(mode: .all, promise: cleanup.closePromise)
         case .fireChannelInactive:
             cleanup.closePromise?.succeed()
             context.fireChannelInactive()

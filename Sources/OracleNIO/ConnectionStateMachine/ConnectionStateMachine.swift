@@ -61,7 +61,16 @@ struct ConnectionStateMachine {
 
         struct CleanUpContext {
             enum Action {
+                /// Log off gracefully, then close the channel.
                 case close
+                /// Close the channel without sending anything first.
+                ///
+                /// Used when the server has already ended the session
+                /// (see ``ConnectionStateMachine/endsServerSession(_:)``):
+                /// a Logoff would never be answered, so waiting for its
+                /// answer would keep the channel, and with it the pooled
+                /// connection, open indefinitely.
+                case closeWithoutLogoff
                 case fireChannelInactive
             }
 
@@ -145,7 +154,8 @@ struct ConnectionStateMachine {
         case forwardRows([DataRow])
         case forwardStreamComplete([DataRow], cursorID: UInt16, affectedRows: Int, lastRowID: RowID?)
         case forwardStreamError(
-            OracleSQLError, read: Bool, cursorID: UInt16?, clientCancelled: Bool
+            OracleSQLError, read: Bool, cursorID: UInt16?, clientCancelled: Bool,
+            cleanupContext: CleanUpContext? = nil
         )
 
         case sendMarker(read: Bool)
@@ -172,6 +182,19 @@ struct ConnectionStateMachine {
             self.state = state
         }
     #endif
+
+    /// `true` once the connection is being torn down and nothing waits for
+    /// a server message any more. Inbound messages are then discarded: a
+    /// server that ended the session may still have written trailing
+    /// messages that no state can interpret.
+    var isDiscardingInbound: Bool {
+        switch self.state {
+        case .closing, .closed:
+            return true
+        default:
+            return false
+        }
+    }
 
     mutating func connected() -> ConnectionAction {
         switch self.state {
@@ -255,8 +278,16 @@ struct ConnectionStateMachine {
             if statement.isComplete {
                 return self.closeConnectionAndCleanup(error)
             } else {
-                let action = statement.errorHappened(error)
-                return self.modify(with: action)
+                // The sub-state machine's new state must be stored before
+                // `modify` runs: otherwise `self.state` keeps the statement
+                // in its pre-error state, and the `readyForStatementReceived`
+                // the channel handler runs after `.failStatement` hits the
+                // "statement is still being executed" precondition.
+                return self.avoidingStateMachineCoW { machine in
+                    let action = statement.errorHappened(error)
+                    machine.state = .statement(statement)
+                    return machine.modify(with: action)
+                }
             }
         case .readyToLogOff, .loggingOff, .closing:
             // If the state machine is in state `.closing`, the connection
@@ -722,10 +753,24 @@ struct ConnectionStateMachine {
         case .lobOperation(let context):
             if error.number == 0 {  // done
                 return .succeedLOBOperation(context)
+            } else if Self.endsServerSession(number: error.number) {
+                // fails the LOB promise and closes the connection
+                return self.closeConnectionAndCleanup(.server(error))
             } else {
                 return .failLOBOperation(context.promise, with: .server(error))
             }
+        case .loggingOff(let closePromise):
+            // The server answered our Logoff with an error (for example
+            // because the session is already gone). No status will follow,
+            // so close the channel now instead of waiting for one.
+            self.state = .closing
+            return .closeConnection(closePromise)
         default:
+            if Self.endsServerSession(number: error.number) {
+                // A ping, commit or rollback was answered with an error that
+                // ends the session: surface the ORA- error and close.
+                return self.closeConnectionAndCleanup(.server(error))
+            }
             return self.closeConnectionAndCleanup(
                 .unexpectedBackendMessage(.error(error))
             )
@@ -847,7 +892,7 @@ struct ConnectionStateMachine {
             self.state = .readyForStatement
             return self.executeNextStatementFromQueue()
 
-        case .loggingOff, .closing, .closed:
+        case .readyToLogOff, .loggingOff, .closing, .closed:
             // Might happen if the connection is getting closed immediately
             // after a ping. In that case the ping's success or failure response
             // triggers a readyForStatementReceived, while we are already closing.
@@ -1029,7 +1074,8 @@ struct ConnectionStateMachine {
                     error,
                     read: read,
                     cursorID: cursorID,
-                    clientCancelled: clientCancelled
+                    clientCancelled: clientCancelled,
+                    cleanupContext: cleanupContext
                 )
             }
 
@@ -1131,12 +1177,11 @@ extension ConnectionStateMachine {
         case .statementCancelled, .nationalCharsetNotSupported, .missingStatement, .malformedStatement:
             return false
         case .server:
-            switch error.serverInfo?.number {
-            case 28, 600:  // connection closed
-                return true
-            default:
-                return false
-            }
+            guard let number = error.serverInfo?.number else { return false }
+            // ORA-00600 is an internal error. It does not necessarily end the
+            // session, but the session's state is unknown afterwards, so the
+            // connection is retired (gracefully, with a Logoff).
+            return number == 600 || Self.endsServerSession(number: number)
         case .clientClosesConnection, .clientClosedConnection:
             preconditionFailure(
                 "Pure client error, that is thrown directly from OracleConnection"
@@ -1147,8 +1192,56 @@ extension ConnectionStateMachine {
     mutating func setErrorAndCreateCleanupContextIfNeeded(
         _ error: OracleSQLError
     ) -> ConnectionAction.CleanUpContext? {
+        switch error.code.base {
+        case .clientClosesConnection, .clientClosedConnection:
+            // pure client errors never come from the statement sub-state
+            // machine; `shouldCloseConnection` refuses them
+            return nil
+        default:
+            break
+        }
         guard self.shouldCloseConnection(reason: error) else { return nil }
         return self.setErrorAndCreateCleanupContext(error)
+    }
+
+    /// Server errors after which the server-side session no longer exists,
+    /// so no later call on the connection can succeed.
+    ///
+    /// A connection that receives one of these is closed at once (without a
+    /// Logoff, see ``ConnectionAction/CleanUpContext/Action/closeWithoutLogoff``),
+    /// which is what makes `OracleClient`'s pool evict it: the pool only
+    /// learns about a dead connection through its channel's close future.
+    /// Meanings (Oracle Database Error Messages):
+    static let sessionEndingServerErrors: Set<UInt32> = [
+        22,  // ORA-00022: invalid session ID; access denied
+        28,  // ORA-00028: your session has been killed
+        45,  // ORA-00045: your session has been terminated with no replay
+        603,  // ORA-00603: ORACLE server session terminated by fatal error
+        1012,  // ORA-01012: not logged on
+        1089,  // ORA-01089: immediate shutdown or close in progress - no operations are permitted
+        1092,  // ORA-01092: ORACLE instance terminated. Disconnection forced
+        2396,  // ORA-02396: exceeded maximum idle time, please connect again
+        2399,  // ORA-02399: exceeded maximum connect time, you are being logged off
+        3113,  // ORA-03113: end-of-file on communication channel
+        3114,  // ORA-03114: not connected to ORACLE
+        3135,  // ORA-03135: connection lost contact
+        3138,  // ORA-03138: connection terminated due to security policy violation
+        7445,  // ORA-07445: exception encountered: core dump (the server process faulted)
+    ]
+    // Deliberately not listed: ORA-00031 ("session marked for kill") is
+    // reported to the session that issued the KILL, not to the victim, and
+    // ORA-01033/01034/01090 can only occur while logging on, where any error
+    // already closes the connection.
+
+    static func endsServerSession(number: UInt32) -> Bool {
+        Self.sessionEndingServerErrors.contains(number)
+    }
+
+    static func endsServerSession(_ error: OracleSQLError) -> Bool {
+        guard case .server = error.code.base, let number = error.serverInfo?.number else {
+            return false
+        }
+        return Self.endsServerSession(number: number)
     }
 
     mutating func setErrorAndCreateCleanupContext(
@@ -1169,11 +1262,17 @@ extension ConnectionStateMachine {
             forwardedPromise = closePromise
         }
 
-        self.state = .readyToLogOff
-
         var action = ConnectionAction.CleanUpContext.Action.close
         if case .uncleanShutdown = error.code.base {
             action = .fireChannelInactive
+            self.state = .readyToLogOff
+        } else if Self.endsServerSession(error) {
+            // Nothing may be sent on a session the server has ended, not
+            // even a Logoff: close the channel right away.
+            action = .closeWithoutLogoff
+            self.state = .closing
+        } else {
+            self.state = .readyToLogOff
         }
 
         return .init(
@@ -1268,7 +1367,10 @@ extension ConnectionStateMachine {
         case .sendFlushOutBinds:
             return .sendFlushOutBinds
         case .failStatement(let promise, let error):
-            return .failStatement(promise, with: error, cleanupContext: nil)
+            return .failStatement(
+                promise, with: error,
+                cleanupContext: self.setErrorAndCreateCleanupContextIfNeeded(error)
+            )
         case .succeedStatement(let promise, let columns):
             return .succeedStatement(promise, columns)
         case .forwardRows(let rows):
@@ -1287,7 +1389,9 @@ extension ConnectionStateMachine {
                 error,
                 read: read,
                 cursorID: cursorID,
-                clientCancelled: clientCancelled
+                clientCancelled: clientCancelled,
+                cleanupContext: clientCancelled
+                    ? nil : self.setErrorAndCreateCleanupContextIfNeeded(error)
             )
         case .forwardCancelComplete:
             return self.readyForStatementReceived()

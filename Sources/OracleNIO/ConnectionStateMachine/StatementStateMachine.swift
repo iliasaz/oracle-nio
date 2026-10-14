@@ -444,6 +444,41 @@ struct StatementStateMachine {
             case .modifying:
                 preconditionFailure("Invalid state: \(self.state)")
             }
+        } else if ConnectionStateMachine.endsServerSession(number: error.number) {
+            // The server ended the session. This must fail the statement
+            // whatever the cursor id (an error with cursor id 0 would
+            // otherwise be read as success below) and whatever the state;
+            // the connection state machine then closes the connection.
+            let sqlError = OracleSQLError.server(error)
+            switch self.state {
+            case .initialized(let context),
+                .describeInfoReceived(let context, _),
+                .rowCountsReceived(let context, _):
+                self.state = .error(sqlError)
+                switch context.type {
+                case .query(let promise),
+                    .plsql(let promise),
+                    .dml(let promise),
+                    .ddl(let promise),
+                    .cursor(_, _, let promise),
+                    .plain(let promise):
+                    action = .failStatement(promise, with: sqlError)
+                }
+            case .streaming(_, _, _, var streamState):
+                self.state = .error(sqlError)
+                switch streamState.fail() {
+                case .read:
+                    action = .forwardStreamError(sqlError, read: true, cursorID: nil)
+                case .wait:
+                    action = .forwardStreamError(sqlError, read: false, cursorID: nil)
+                }
+            case .drain, .commandComplete, .error:
+                // nobody awaits this statement any more
+                self.state = .error(sqlError)
+                action = .evaluateErrorAtConnectionLevel(sqlError)
+            case .modifying:
+                preconditionFailure("Invalid state: \(self.state)")
+            }
         } else if self.isCancelled && error.number == 1013 {
             // ORA-01013 is the server's response to a client-initiated
             // TNS BREAK marker (see ``OracleConnection/cancel()``). For

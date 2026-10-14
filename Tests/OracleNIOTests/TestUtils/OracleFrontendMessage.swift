@@ -20,4 +20,6 @@ enum OracleFrontendMessage {
     case close
     case oob
     case marker
+    /// execute, re-execute or fetch
+    case execute
 }

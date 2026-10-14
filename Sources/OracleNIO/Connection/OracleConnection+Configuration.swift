@@ -72,8 +72,27 @@ extension OracleConnection {
 
         /// Describes options affecting how the underlying connection is made.
         public struct Options: Sendable {
-            /// A timeout for connection attempts. Defaults to ten seconds.
+            /// A timeout for establishing the TCP connection. Defaults to ten seconds.
+            ///
+            /// It bounds the transport connect only. The TLS, TNS and authentication
+            /// exchange that follows is bounded by ``handshakeTimeout``.
             public var connectTimeout: TimeAmount
+
+            /// A deadline for the handshake that follows the TCP connect: the TLS
+            /// handshake (when TLS is required), the TNS connect/accept, protocol and
+            /// data-types exchange, and authentication. Defaults to thirty seconds.
+            ///
+            /// When it expires before the connection is ready, the channel is closed
+            /// and the attempt fails with ``OracleSQLError/Code/handshakeTimeout``;
+            /// ``OracleConnection/Configuration/retryCount`` then applies as for any
+            /// other failed attempt. The deadline also bounds a failed attempt whose
+            /// channel does not close by itself. It applies to every connect,
+            /// including the ones `OracleClient`'s pool makes.
+            ///
+            /// Set it to `nil` to leave the handshake unbounded, which was the
+            /// behaviour before this option existed: a server that accepts TCP and
+            /// then stays silent holds the attempt until TCP keepalive gives up.
+            public var handshakeTimeout: TimeAmount?
 
             /// The server name to use for certificate validation and SNI (Server Name Indication) when
             /// TLS is enabled.
@@ -92,6 +111,7 @@ extension OracleConnection {
             /// Most users should not need to adjust the defaults.
             public init() {
                 self.connectTimeout = .seconds(10)
+                self.handshakeTimeout = .seconds(30)
             }
         }
 

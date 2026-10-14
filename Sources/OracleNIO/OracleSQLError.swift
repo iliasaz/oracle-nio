@@ -45,6 +45,7 @@ public struct OracleSQLError: Sendable, Error {
             case unsupportedDataType
             case missingStatement
             case malformedStatement
+            case handshakeTimeout
         }
 
         @usableFromInline
@@ -140,6 +141,13 @@ public struct OracleSQLError: Sendable, Error {
             Self(.malformedStatement)
         }
 
+        /// The TLS, TNS or authentication handshake did not finish within
+        /// ``OracleConnection/Configuration/Options-swift.struct/handshakeTimeout``.
+        @inlinable
+        public static var handshakeTimeout: Self {
+            Self(.handshakeTimeout)
+        }
+
         @inlinable
         public var description: String {
             switch self.base {
@@ -177,6 +185,8 @@ public struct OracleSQLError: Sendable, Error {
                 return "missingStatement"
             case .malformedStatement:
                 return "malformedStatement"
+            case .handshakeTimeout:
+                return "handshakeTimeout"
             }
         }
     }
@@ -486,6 +496,12 @@ public struct OracleSQLError: Sendable, Error {
         OracleSQLError(code: .missingStatement)
     }
 
+    static func handshakeTimeout(after timeout: TimeAmount) -> OracleSQLError {
+        var error = OracleSQLError(code: .handshakeTimeout)
+        error.underlying = HandshakeTimeoutError(timeout: timeout)
+        return error
+    }
+
     @inlinable
     static func malformedStatement(reason: MalformedStatementError) -> OracleSQLError {
         var error = OracleSQLError(code: .missingStatement)
@@ -600,6 +616,16 @@ extension OracleSQLError {
 
     enum ConnectionError: Error {
         case invalidServerResponse
+    }
+
+    /// The underlying error of ``Code/handshakeTimeout``.
+    struct HandshakeTimeoutError: Error, Sendable, CustomStringConvertible {
+        /// The deadline that expired.
+        let timeout: TimeAmount
+
+        var description: String {
+            "handshake did not finish within \(self.timeout)"
+        }
     }
 
 }

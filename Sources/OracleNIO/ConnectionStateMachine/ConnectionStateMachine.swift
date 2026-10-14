@@ -1172,7 +1172,8 @@ extension ConnectionStateMachine {
             .serverVersionNotSupported,
             .sidNotSupported,
             .uncleanShutdown,
-            .unsupportedDataType:
+            .unsupportedDataType,
+            .handshakeTimeout:
             return true
         case .statementCancelled, .nationalCharsetNotSupported, .missingStatement, .malformedStatement:
             return false

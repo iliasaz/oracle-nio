@@ -64,7 +64,9 @@ extension ByteBuffer {
         case 2:
             return self.readInteger(as: UInt16.self).map(UInt32.init(_:))
         case 3:
-            guard let bytes = readBytes(length: Int(length)) else { fatalError() }
+            // A 3-byte value (0x01_0000...0xFF_FFFF, e.g. a data object number in a RowID) may
+            // straddle a TNS packet boundary: a short buffer means "need more data", like 1, 2, 4.
+            guard let bytes = readBytes(length: 3) else { return nil }
             return UInt32(bytes[0]) << 16 | UInt32(bytes[1]) << 8 | UInt32(bytes[2])
         case 4:
             return self.readInteger(as: UInt32.self)
@@ -99,7 +101,7 @@ extension ByteBuffer {
         case 2:
             return self.readInteger(as: UInt16.self).map(UInt64.init)
         case 3:
-            guard let bytes = readBytes(length: Int(length)) else { fatalError() }
+            guard let bytes = readBytes(length: 3) else { return nil }  // need more data, as in readUB4
             return UInt64(bytes[0]) << 16 | UInt64(bytes[1]) << 8 | UInt64(bytes[2])
         case 4:
             return self.readInteger(as: UInt32.self).map(UInt64.init)

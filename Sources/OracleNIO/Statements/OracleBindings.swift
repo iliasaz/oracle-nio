@@ -37,8 +37,7 @@ struct OracleBindingsCollection {
             if metadata.count <= index {
                 metadata.append(column)
             } else {
-                let currentMetadata = metadata[index]
-                if column.size > currentMetadata.size || column.bufferSize > currentMetadata.bufferSize {
+                if metadata[index].isReplaced(by: column) {
                     metadata[index] = column
                 }
             }
@@ -53,7 +52,7 @@ struct OracleBindingsCollection {
         into buffers: inout (ByteBuffer, long: ByteBuffer),
         index: inout Int
     ) throws {
-        let newMetadata =
+        var newMetadata =
             if let bind {
                 OracleBindings.Metadata(
                     value: bind,
@@ -71,6 +70,7 @@ struct OracleBindingsCollection {
                     bindName: "\(index)"
                 )
             }
+        if bind == nil { newMetadata.isNull = true }
         if let bind, newMetadata.bufferSize >= Constants.TNS_MIN_LONG_LENGTH {
             try bind._encodeRaw(into: &buffers.long, context: context)
         } else if let bind {
@@ -91,8 +91,7 @@ struct OracleBindingsCollection {
         if metadata.count <= index {
             metadata.append(newMetadata)
         } else {
-            let currentMetadata = metadata[index]
-            if newMetadata.size > currentMetadata.size || newMetadata.bufferSize > currentMetadata.bufferSize {
+            if metadata[index].isReplaced(by: newMetadata) {
                 metadata[index] = newMetadata
             }
         }
@@ -123,6 +122,26 @@ public struct OracleBindings: Sendable, Hashable {
         var bindName: String?
         @usableFromInline
         var outContainer: OracleRef?  // reference type for return binds
+
+        /// `true` when this metadata describes a NULL bind, whose type is only the bind's static
+        /// ``OracleThrowingDynamicTypeEncodable/defaultOracleType`` and not the type a value in the
+        /// same column was encoded with.
+        @usableFromInline
+        var isNull: Bool = false
+
+        /// Whether `new`, a later row's metadata for the same column of a batch, replaces `self` as
+        /// the column's shared metadata.
+        ///
+        /// A value always replaces a NULL, and a NULL never replaces a value: a NULL's metadata
+        /// carries its static default type with size 1, which would otherwise win over a value type
+        /// whose default size is 0 (BINARY_DOUBLE, BINARY_FLOAT, NUMBER, ...) and make every value in
+        /// the column overflow a VARCHAR(1) bind (ORA-01461). Between two values, or two NULLs, the
+        /// larger size or buffer size wins, as before.
+        @inlinable
+        func isReplaced(by new: Metadata) -> Bool {
+            if self.isNull != new.isNull { return self.isNull }
+            return new.size > self.size || new.bufferSize > self.bufferSize
+        }
 
         @inlinable
         init(
@@ -216,16 +235,17 @@ public struct OracleBindings: Sendable, Hashable {
         } else {
             self.bytes.writeInteger(UInt8(0))
         }
-        self.metadata.append(
-            .init(
-                dataType: dataType,
-                protected: false,
-                size: 1,
-                isArray: false,
-                arrayCount: nil,
-                maxArraySize: nil,
-                bindName: bindName
-            ))
+        var metadata = Metadata(
+            dataType: dataType,
+            protected: false,
+            size: 1,
+            isArray: false,
+            arrayCount: nil,
+            maxArraySize: nil,
+            bindName: bindName
+        )
+        metadata.isNull = true
+        self.metadata.append(metadata)
     }
 
     public mutating func appendNull() {
